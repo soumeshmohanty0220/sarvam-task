@@ -27,7 +27,7 @@ It leverages **Google’s Generative AI (Gemini)**
 
 1. **Python 3.7+**  
 2. **Streamlit** (for the web UI)  
-3. **google-generativeai** (Gemini / PaLM library)  
+3. **google-generativeai** (Gemini)  
 4. **python-dotenv** (for loading environment variables)  
 
 Example:
