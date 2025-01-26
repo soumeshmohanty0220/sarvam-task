@@ -375,13 +375,13 @@ class OrderProcessor:
             handle_action(intent, items, explanation)
 
 def main():
-    st.title("GreenLife Order Processing - Enhanced Version")
+    st.title("GreenLife Order Processing")
 
     # Initialize processor
     processor = OrderProcessor()
     
     # User input
-    user_input = st.text_input("Enter your request (you can do multiple actions at once):", "")
+    user_input = st.text_input("Enter your request:", "")
     process_button = st.button("Process")
     
     if process_button and user_input.strip():
