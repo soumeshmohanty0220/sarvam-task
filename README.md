@@ -1,4 +1,4 @@
-# GreenLife Chatbot — Order Processing with Repeat Feature
+# GreenLife Chatbot
 
 This repository contains a **Streamlit**-based chatbot that can:
 
