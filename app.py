@@ -285,6 +285,7 @@ class OrderProcessor:
             logging.debug(f"Raw AI output: {raw_text}")
 
             # Attempt to parse JSON from the model's response
+            # Ensures that the data dictionary has a valid actions key, which is expected to hold a list. If it is missing or not structured correctly, it fixes the issue by assigning an empty list to data["actions"].
             data = json.loads(raw_text)
             if "actions" not in data or not isinstance(data["actions"], list):
                 data["actions"] = []
