@@ -1,0 +1,102 @@
+[
+    {
+        "name": "Organic Almonds",
+        "price": 15.99,
+        "stock": 100
+    },
+    {
+        "name": "Quinoa",
+        "price": 12.50,
+        "stock": 150
+    },
+    {
+        "name": "Chia Seeds",
+        "price": 8.75,
+        "stock": 200
+    },
+    {
+        "name": "Organic Honey",
+        "price": 10.00,
+        "stock": 80
+    },
+    {
+        "name": "Brown Rice",
+        "price": 5.99,
+        "stock": 120
+    },
+    {
+        "name": "Coconut Oil",
+        "price": 14.20,
+        "stock": 90
+    },
+    {
+        "name": "Organic Oats",
+        "price": 6.50,
+        "stock": 160
+    },
+    {
+        "name": "Almond Butter",
+        "price": 9.99,
+        "stock": 70
+    },
+    {
+        "name": "Green Tea",
+        "price": 4.50,
+        "stock": 300
+    },
+    {
+        "name": "Organic Dried Mango",
+        "price": 7.80,
+        "stock": 110
+    },
+    {
+        "name": "Maple Syrup",
+        "price": 11.25,
+        "stock": 60
+    },
+    {
+        "name": "Organic Cashews",
+        "price": 16.50,
+        "stock": 95
+    },
+    {
+        "name": "Flaxseed",
+        "price": 5.40,
+        "stock": 140
+    },
+    {
+        "name": "Tahini",
+        "price": 8.30,
+        "stock": 85
+    },
+    {
+        "name": "Organic Lentils",
+        "price": 6.20,
+        "stock": 130
+    },
+    {
+        "name": "Hemp Seeds",
+        "price": 9.50,
+        "stock": 75
+    },
+    {
+        "name": "Organic Spices Set",
+        "price": 20.00,
+        "stock": 50
+    },
+    {
+        "name": "Organic Tomato Paste",
+        "price": 3.60,
+        "stock": 200
+    },
+    {
+        "name": "Raw Cacao Nibs",
+        "price": 12.00,
+        "stock": 65
+    },
+    {
+        "name": "Organic Black Beans",
+        "price": 4.80,
+        "stock": 180
+    }
+]
