@@ -9,15 +9,23 @@ import logging
 from typing import Dict, Any, Optional, List
 from difflib import get_close_matches
 import re  # For parsing "last X orders"
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
 # --------------------------------------------------------------------------
 # 1) CONFIG & UTILS
 # --------------------------------------------------------------------------
 
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
-load_dotenv()  # Load environment variables (for GEMINI_API_KEY, etc.)
 
+# Load environment variables (ensure you have a .env file with GEMINI_API_KEY)
+load_dotenv()
+
+# File paths
 ORDERS_DB_FILE = "orders_db.json"
+PRODUCTS_DB_FILE = "products_db.json"  # New file to save products
 
 def load_orders_db() -> List[Dict[str, Any]]:
     """
@@ -43,18 +51,110 @@ def save_orders_db(all_orders: List[Dict[str, Any]]):
     with open(ORDERS_DB_FILE, "w") as f:
         json.dump(all_orders, f, indent=2)
 
+def load_products_db() -> List[Dict[str, Any]]:
+    """
+    Loads all products from a JSON file (products_db.json).
+    If the file does not exist or is invalid, returns an empty list.
+    """
+    if not os.path.exists(PRODUCTS_DB_FILE):
+        return []
+    with open(PRODUCTS_DB_FILE, "r") as f:
+        try:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            return data
+        except json.JSONDecodeError:
+            return []
+
+def save_products_db(all_products: List[Dict[str, Any]]):
+    """
+    Saves the entire list of products to the JSON file (products_db.json).
+    Overwrites any existing content.
+    """
+    with open(PRODUCTS_DB_FILE, "w") as f:
+        json.dump(all_products, f, indent=2)
+
 # --------------------------------------------------------------------------
-# 2) MAIN ORDER PROCESSOR CLASS
+# 2) VECTOR STORE SETUP
+# --------------------------------------------------------------------------
+
+class VectorStore:
+    def __init__(self, products: List[Dict[str, Any]], embedding_model_name: str = 'all-MiniLM-L6-v2'):
+        """
+        Initializes the VectorStore with product embeddings.
+        """
+        self.products = products
+        self.model = SentenceTransformer(embedding_model_name)
+        self.embeddings = self._generate_embeddings()
+        self.index = self._create_faiss_index()
+
+    def _generate_embeddings(self) -> np.ndarray:
+        """
+        Generates embeddings for all products.
+        """
+        product_texts = [product['name'] for product in self.products]
+        embeddings = self.model.encode(product_texts, convert_to_numpy=True)
+        return embeddings
+
+    def _create_faiss_index(self) -> faiss.Index:
+        """
+        Creates a FAISS index for the embeddings.
+        """
+        if len(self.embeddings) == 0:
+            dimension = 384  # Default dimension for 'all-MiniLM-L6-v2'
+            index = faiss.IndexFlatL2(dimension)
+            return index
+        dimension = self.embeddings.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(self.embeddings)
+        return index
+
+    def query(self, query_text: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        """
+        Queries the vector store and returns the top_k most similar products.
+        """
+        if not self.products:
+            return []
+
+        query_embedding = self.model.encode([query_text], convert_to_numpy=True)
+        if self.index.ntotal == 0:
+            return []
+
+        distances, indices = self.index.search(query_embedding, top_k)
+        results = []
+        for idx in indices[0]:
+            if idx < len(self.products):
+                results.append(self.products[idx])
+        return results
+
+    def add_product(self, product: Dict[str, Any]):
+        """
+        Adds a new product to the vector store.
+        """
+        self.products.append(product)
+        new_embedding = self.model.encode([product['name']], convert_to_numpy=True)
+        self.embeddings = np.vstack([self.embeddings, new_embedding])
+        self.index.add(new_embedding)
+
+    def update_product(self, product_index: int, updated_product: Dict[str, Any]):
+        """
+        Updates an existing product and rebuilds the FAISS index.
+        Note: FAISS does not support updating vectors directly.
+        A workaround is to rebuild the index.
+        """
+        self.products[product_index] = updated_product
+        self.embeddings = self._generate_embeddings()
+        self.index = self._create_faiss_index()
+
+# --------------------------------------------------------------------------
+# 3) MAIN ORDER PROCESSOR CLASS
 # --------------------------------------------------------------------------
 
 class OrderProcessor:
     """
-    The OrderProcessor class wraps all functionality for:
-    - Managing a product catalog (loaded from products.json)
-    - Handling store actions (ADD, REMOVE, VIEW_CART, etc.)
-    - Confirming orders and saving them to a JSON database (orders_db.json)
-    - Repeating past orders (all or last X)
-    - Falling back to a general conversation if no store action is found
+    The OrderProcessor class manages the product catalog, handles store actions,
+    confirms orders, repeats past orders, and falls back to general conversation.
     """
 
     def __init__(self, products_file: str = 'products.json'):
@@ -63,15 +163,22 @@ class OrderProcessor:
         Loads products from a JSON file and configures the AI model.
         Also initializes or loads the orders database.
         """
-        # 2.1) Load products from JSON
-        try:
-            with open(products_file, 'r') as f:
-                self.PRODUCTS = json.load(f)
-        except FileNotFoundError:
-            logging.error(f"Products file '{products_file}' not found. Proceeding with empty list.")
-            self.PRODUCTS = []
+        # 3.1) Load products from JSON
+        self.PRODUCTS = load_products_db()
+        if not self.PRODUCTS:
+            # Fallback to original products.json if products_db.json is empty
+            try:
+                with open(products_file, 'r') as f:
+                    self.PRODUCTS = json.load(f)
+                save_products_db(self.PRODUCTS)  # Save to products_db.json
+            except FileNotFoundError:
+                logging.error(f"Products file '{products_file}' not found. Proceeding with empty list.")
+                self.PRODUCTS = []
 
-        # 2.2) Configure the AI model (Google Generative AI, Gemini)
+        # 3.2) Initialize VectorStore
+        self.vector_store = VectorStore(self.PRODUCTS)
+
+        # 3.3) Configure the AI model (Google Generative AI, Gemini)
         try:
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             self.model = genai.GenerativeModel("gemini-1.5-flash-8b")
@@ -79,7 +186,7 @@ class OrderProcessor:
             logging.error(f"AI model initialization error: {e}")
             self.model = None
 
-        # 2.3) Initialize Streamlit session states (cart, user info, etc.)
+        # 3.4) Initialize Streamlit session states (cart, user info, etc.)
         if 'cart' not in st.session_state:
             st.session_state.cart = {}
         if 'order_confirmed' not in st.session_state:
@@ -87,160 +194,150 @@ class OrderProcessor:
         if 'user_id' not in st.session_state:
             st.session_state.user_id = None
 
-        # 2.4) Load the existing orders database from JSON
+        # 3.5) Load the existing orders database from JSON
         self.all_orders = load_orders_db()
 
     # ----------------------------------------------------------------------
-    # 3) LLM PROMPTS AND PARSING
+    # 4) LLM PROMPTS AND PARSING
     # ----------------------------------------------------------------------
 
     def generate_intent_prompt(self, user_input: str) -> str:
         """
         Constructs a prompt that instructs the AI to parse store-related actions
-        from the user's text. Includes synonyms and the new REPEAT_ORDER feature
-        for "repeat all my orders" or "last X orders".
-        We also provide examples to ensure the model understands multiple actions
-        can appear in a single request.
-
-        If the user says something like:
-          - "Add 2 quinoa and show me the cart"
-            => parse as two actions: ADD + VIEW_CART
-          - "Place an order for 2 quinoa and 2 almonds"
-            => parse as two actions: ADD + CONFIRM_ORDER
-          - "Add 1 kale, 2 almonds, 3 quinoa, remove 1 quinoa, and confirm order"
-            => parse as ADD + REMOVE + CONFIRM_ORDER
+        from the user's text. Includes only relevant products retrieved via VectorStore.
         """
-
-        products_list = ", ".join(p['name'] for p in self.PRODUCTS)
+        # Retrieve relevant products based on user input
+        relevant_products = self.vector_store.query(user_input, top_k=20)
+        products_list = ", ".join(p['name'] for p in relevant_products)
 
         return f"""
-        You are an assistant that processes store orders for the user (with a user_id).
-        The user may specify multiple or combined actions in a single request.
-        You should parse them all in order. Each action should become a separate
-        object in the "actions" array.
+You are an assistant that processes store orders for the user (with a user_id).
+The user may specify multiple or combined actions in a single request.
+You should parse them all in order. Each action should become a separate
+object in the "actions" array.
 
-        **Possible Actions & Synonyms**:
-        1) ADD
-           - synonyms: "add", "put", "place", "include", "add to cart"
-        2) REMOVE
-           - synonyms: "remove", "delete", "take out", "subtract"
-        3) VIEW_CART
-           - synonyms: "show cart", "view cart", "what's in my cart", "see my cart", "show my current orders"
-        4) VIEW_PRODUCTS
-           - synonyms: "list products", "show products", "catalog"
-        5) CONFIRM_ORDER
-           - synonyms: "confirm", "checkout", "bill me", "finalize", "complete purchase",
-             "pay", "complete my order", "place order", "place an order"
-        6) CANCEL_ORDER
-           - synonyms: "cancel order", "void order", "abort order"
-        7) RESET_CART
-           - synonyms: "reset cart", "clear cart", "empty cart"
-        8) REPEAT_ORDER
-           - synonyms: "repeat my last order", "repeat my last 3 orders", "repeat all my orders",
-             "reorder", "order again", etc.
-           Explanation:
-             If the user references "repeat all my previous orders", or "repeat last X orders",
-             you can interpret:
-               "intent": "REPEAT_ORDER",
-               "items": [{{"product": null, "quantity": null}}],
-               "explanation": "User wants to reorder from all or last X."
+**Possible Actions & Synonyms**:
+1) ADD
+   - synonyms: "add", "put", "place", "include", "add to cart"
+2) REMOVE
+   - synonyms: "remove", "delete", "take out", "subtract"
+3) VIEW_CART
+   - synonyms: "show cart", "view cart", "what's in my cart", "see my cart", "show my current orders"
+4) VIEW_PRODUCTS
+   - synonyms: "list products", "show products", "catalog"
+5) CONFIRM_ORDER
+   - synonyms: "confirm", "checkout", "bill me", "finalize", "complete purchase",
+     "pay", "complete my order", "place order", "place an order"
+6) CANCEL_ORDER
+   - synonyms: "cancel order", "void order", "abort order"
+7) RESET_CART
+   - synonyms: "reset cart", "clear cart", "empty cart"
+8) REPEAT_ORDER
+   - synonyms: "repeat my last order", "repeat my last 3 orders", "repeat all my orders",
+     "reorder", "order again", etc.
+   Explanation:
+     If the user references "repeat all my previous orders", or "repeat last X orders",
+     you can interpret:
+       "intent": "REPEAT_ORDER",
+       "items": [{"product": null, "quantity": null}],
+       "explanation": "User wants to reorder from all or last X."
 
-        **Handling Multiple Items**:
-        - If the user says "add 2 quinoa and 2 almonds", you can group them under a single
-          ADD action with multiple items in the array, or use multiple ADD actions. Either is valid.
-          E.g.:
-          {{
-            "actions": [
-              {{
-                "intent": "ADD",
-                "items": [
-                  {{"product": "quinoa", "quantity": 2}},
-                  {{"product": "almonds", "quantity": 2}}
-                ],
-                "explanation": "User wants multiple items"
-              }}
-            ]
-          }}
+**Handling Multiple Items**:
+- If the user says "add 2 quinoa and 2 almonds", you can group them under a single
+  ADD action with multiple items in the array, or use multiple ADD actions. Either is valid.
+  E.g.:
+  {
+    "actions": [
+      {
+        "intent": "ADD",
+        "items": [
+          {"product": "quinoa", "quantity": 2},
+          {"product": "almonds", "quantity": 2}
+        ],
+        "explanation": "User wants multiple items"
+      }
+    ]
+  }
 
-        **Handling Quantities**:
-        - If user requests more items than in stock, parse it normally,
-          but note the potential issue in "explanation" if needed.
+**Handling Quantities**:
+- If user requests more items than in stock, parse it normally,
+  but note the potential issue in "explanation" if needed.
 
-        **Examples**:
-        - If the user says: "Add 2 quinoa and show me the cart",
-          return:
-          {{
-            "actions": [
-              {{
-                "intent": "ADD",
-                "items": [
-                  {{"product": "quinoa", "quantity": 2}}
-                ],
-                "explanation": "User wants to add quinoa"
-              }},
-              {{
-                "intent": "VIEW_CART",
-                "items": [],
-                "explanation": "User wants to see the cart"
-              }}
-            ]
-          }}
-        - If the user says: "Place an order for 2 quinoa and 2 almonds",
-          interpret as:
-          {{
-            "actions": [
-              {{
-                "intent": "ADD",
-                "items": [
-                  {{"product": "quinoa", "quantity": 2}},
-                  {{"product": "almonds", "quantity": 2}}
-                ],
-                "explanation": "User wants to add these items"
-              }},
-              {{
-                "intent": "CONFIRM_ORDER",
-                "items": [],
-                "explanation": "User wants to finalize/checkout"
-              }}
-            ]
-          }}
+**Examples**:
+- If the user says: "Add 2 quinoa and show me the cart",
+  return:
+  {
+    "actions": [
+      {
+        "intent": "ADD",
+        "items": [
+          {"product": "quinoa", "quantity": 2}
+        ],
+        "explanation": "User wants to add quinoa"
+      },
+      {
+        "intent": "VIEW_CART",
+        "items": [],
+        "explanation": "User wants to see the cart"
+      }
+    ]
+  }
+- If the user says: "Place an order for 2 quinoa and 2 almonds",
+  interpret as:
+  {
+    "actions": [
+      {
+        "intent": "ADD",
+        "items": [
+          {"product": "quinoa", "quantity": 2},
+          {"product": "almonds", "quantity": 2}
+        ],
+        "explanation": "User wants to add these items"
+      },
+      {
+        "intent": "CONFIRM_ORDER",
+        "items": [],
+        "explanation": "User wants to finalize/checkout"
+      }
+    ]
+  }
 
-        **JSON OUTPUT**:
-        Return JSON of the form:
-        {{
-          "actions": [
-            {{
-              "intent": "ADD or REMOVE or ...",
-              "items": [
-                {{
-                  "product": "string or null",
-                  "quantity": number or null
-                }},
-                ...
-              ],
-              "explanation": "string"
-            }},
-            ...
-          ]
-        }}
+**JSON OUTPUT**:
+Return JSON of the form:
+{
+  "actions": [
+    {
+      "intent": "ADD or REMOVE or ...",
+      "items": [
+        {
+          "product": "string or null",
+          "quantity": number or null
+        },
+        ...
+      ],
+      "explanation": "string"
+    },
+    ...
+  ]
+}
 
-        If no recognized store action is found, return:
-        {{
-          "actions": [
-            {{
-              "intent": "UNKNOWN",
-              "items": [],
-              "explanation": "No recognized store intent found."
-            }}
-          ]
-        }}
+If no recognized store action is found, return:
+{
+  "actions": [
+    {
+      "intent": "UNKNOWN",
+      "items": [],
+      "explanation": "No recognized store intent found."
+    }
+  ]
+}
 
-        **Available Products**: {products_list}
+**Available Products**: {products_list}
 
-        **User Input**: "{user_input}"
+**User Input**: "{user_input}"
 
-        Return only valid JSON, without backticks or code fences.
-        """
+Return only valid JSON, without backticks or code fences.
+"""
 
     def parse_intent(self, user_input: str) -> Dict[str, Any]:
         """
@@ -262,7 +359,8 @@ class OrderProcessor:
 
         try:
             # Generate structured content from the prompt
-            response = self.model.generate_content(self.generate_intent_prompt(user_input))
+            prompt = self.generate_intent_prompt(user_input)
+            response = self.model.generate_content(prompt)
 
             # Check if we got a valid response with content
             if not response.candidates or not response.candidates[0].content.parts:
@@ -285,7 +383,6 @@ class OrderProcessor:
             logging.debug(f"Raw AI output: {raw_text}")
 
             # Attempt to parse JSON from the model's response
-            # Ensures that the data dictionary has a valid actions key, which is expected to hold a list. If it is missing or not structured correctly, it fixes the issue by assigning an empty list to data["actions"].
             data = json.loads(raw_text)
             if "actions" not in data or not isinstance(data["actions"], list):
                 data["actions"] = []
@@ -316,34 +413,36 @@ class OrderProcessor:
             }
 
     # ----------------------------------------------------------------------
-    # 4) GENERAL CONVERSATION FALLBACK
+    # 5) GENERAL CONVERSATION FALLBACK
     # ----------------------------------------------------------------------
 
     def generate_general_response(self, user_input: str) -> str:    
         """
         If the user input doesn't match store actions, we respond conversationally
-        using a simpler open-ended prompt. We still include product listings
-        for context, in case they ask about them.
+        using a simpler open-ended prompt. We retrieve relevant product information
+        based on the user's input to include in the context.
         """
         if not self.model:
             return "I'm sorry, I'm having trouble connecting to my conversation module right now."
 
+        # Retrieve relevant products
+        relevant_products = self.vector_store.query(user_input, top_k=10)
         product_descriptions = "\n".join([
             f"- {p['name']}: ${p['price']} (Stock: {p['stock']})"
-            for p in self.PRODUCTS
-        ])
+            for p in relevant_products
+        ]) if relevant_products else "No relevant products found."
 
         prompt = f"""
-        You are a friendly assistant for GreenLife, a health food store.
-        The user is asking a question or making a statement that might not map to a store action.
-        Please respond conversationally. If they ask about products, refer to them from this list:
+You are a friendly assistant for GreenLife, a health food store.
+The user is asking a question or making a statement that might not map to a store action.
+Please respond conversationally. If they ask about products, refer to them from this list:
 
-        {product_descriptions}
+{product_descriptions}
 
-        If it's a general question, answer politely or provide small talk.
+If it's a general question, answer politely or provide small talk.
 
-        User said: "{user_input}"
-        """
+User said: "{user_input}"
+"""
 
         try:
             response = self.model.generate_content(prompt)
@@ -358,7 +457,7 @@ class OrderProcessor:
             return "I'm sorry, I had trouble generating a conversational response right now."
 
     # ----------------------------------------------------------------------
-    # 5) BASIC STORE ACTIONS
+    # 6) BASIC STORE ACTIONS
     # ----------------------------------------------------------------------
 
     def find_product(self, product_query: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -556,7 +655,7 @@ class OrderProcessor:
         st.info("Your cart has been reset.")
 
     # ----------------------------------------------------------------------
-    # 6) REPEAT ORDER LOGIC
+    # 7) REPEAT ORDER LOGIC
     # ----------------------------------------------------------------------
 
     def repeat_order_by_criteria(self, explanation: str) -> None:
@@ -611,7 +710,7 @@ class OrderProcessor:
             self.add_to_cart(product_name, qty)
 
     # ----------------------------------------------------------------------
-    # 7) REQUEST PROCESSING: ACTIONS + FALLBACK
+    # 8) REQUEST PROCESSING: ACTIONS + FALLBACK
     # ----------------------------------------------------------------------
 
     def process_request(self, user_input: str) -> None:
@@ -689,8 +788,28 @@ class OrderProcessor:
             response_text = self.generate_general_response(user_input)
             st.write(response_text)
 
+    # ----------------------------------------------------------------------
+    # 9) PRODUCT MANAGEMENT METHODS
+    # ----------------------------------------------------------------------
+
+    def add_new_product(self, product: Dict[str, Any]) -> None:
+        """
+        Adds a new product to both the PRODUCTS list and the VectorStore.
+        """
+        self.PRODUCTS.append(product)
+        self.vector_store.add_product(product)
+        save_products_db(self.PRODUCTS)  # Save to products_db.json
+
+    def update_existing_product(self, product_index: int, updated_product: Dict[str, Any]) -> None:
+        """
+        Updates an existing product and rebuilds the FAISS index.
+        """
+        self.PRODUCTS[product_index] = updated_product
+        self.vector_store.update_product(product_index)
+        save_products_db(self.PRODUCTS)  # Save to products_db.json
+
 # --------------------------------------------------------------------------
-# 8) STREAMLIT ENTRY POINT
+# 10) STREAMLIT ENTRY POINT
 # --------------------------------------------------------------------------
 
 def main():
@@ -700,6 +819,7 @@ def main():
     2) Initializes the OrderProcessor.
     3) Accepts user input in a text box.
     4) Displays the cart contents after each request.
+    5) Provides an admin panel to add/update products.
     """
     st.title("GreenLife Chatbot")
 
@@ -719,6 +839,63 @@ def main():
 
     st.write("---")
     processor.view_cart()
+
+    # ----------------------------------------------------------------------
+    # Admin Panel for Product Management
+    # ----------------------------------------------------------------------
+    st.sidebar.header("Admin Panel")
+    admin_action = st.sidebar.selectbox("Select Action", ["None", "Add Product", "Update Product"])
+
+    if admin_action == "Add Product":
+        with st.sidebar.form("Add Product"):
+            st.subheader("Add a New Product")
+            new_name = st.text_input("Product Name")
+            new_price = st.number_input("Price ($)", min_value=0.0, format="%.2f")
+            new_stock = st.number_input("Stock Quantity", min_value=0, step=1)
+            submitted = st.form_submit_button("Add Product")
+            if submitted:
+                if not new_name:
+                    st.sidebar.error("Product name cannot be empty.")
+                else:
+                    new_product = {
+                        "name": new_name,
+                        "price": new_price,
+                        "stock": new_stock
+                    }
+                    processor.add_new_product(new_product)
+                    st.sidebar.success(f"Added product '{new_name}'.")
+
+    elif admin_action == "Update Product":
+        product_names = [p['name'] for p in processor.PRODUCTS]
+        if not product_names:
+            st.sidebar.info("No products available to update.")
+        else:
+            selected_product = st.sidebar.selectbox("Select Product to Update", ["Select a product"] + product_names)
+            if selected_product != "Select a product":
+                product_index = product_names.index(selected_product)
+                with st.sidebar.form("Update Product"):
+                    st.subheader("Update Product Details")
+                    updated_name = st.text_input("Product Name", value=processor.PRODUCTS[product_index]['name'])
+                    updated_price = st.number_input(
+                        "Price ($)", min_value=0.0, format="%.2f",
+                        value=processor.PRODUCTS[product_index]['price']
+                    )
+                    updated_stock = st.number_input(
+                        "Stock Quantity", min_value=0, step=1,
+                        value=processor.PRODUCTS[product_index]['stock']
+                    )
+                    submitted = st.form_submit_button("Update Product")
+                    if submitted:
+                        if not updated_name:
+                            st.sidebar.error("Product name cannot be empty.")
+                        else:
+                            updated_product = {
+                                "name": updated_name,
+                                "price": updated_price,
+                                "stock": updated_stock
+                            }
+                            processor.update_existing_product(product_index, updated_product)
+                            st.sidebar.success(f"Updated product '{updated_name}'.")
 
 # Run the Streamlit app
 if __name__ == "__main__":

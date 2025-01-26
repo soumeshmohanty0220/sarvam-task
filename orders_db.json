@@ -143,5 +143,16 @@
         "quantity": 2
       }
     }
+  },
+  {
+    "order_id": "b3dab162-4766-425d-b3a1-cf3ecbe6267e",
+    "user_id": "Soumesh Mohanty",
+    "timestamp": "2025-01-26T21:17:46.598855",
+    "items": {
+      "Quinoa": {
+        "price": 12.5,
+        "quantity": 2
+      }
+    }
   }
 ]
