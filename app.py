@@ -10,9 +10,9 @@ from typing import Dict, Any, Optional, List
 from difflib import get_close_matches
 import re  # For parsing "last X orders"
 
-# ------------------------------------------------------------------------------
-#  1) CONFIG & UTILS
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 1) CONFIG & UTILS
+# --------------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s: %(message)s')
 load_dotenv()  # Load environment variables (for GEMINI_API_KEY, etc.)
@@ -43,9 +43,9 @@ def save_orders_db(all_orders: List[Dict[str, Any]]):
     with open(ORDERS_DB_FILE, "w") as f:
         json.dump(all_orders, f, indent=2)
 
-# ------------------------------------------------------------------------------
-#  2) MAIN ORDER PROCESSOR CLASS
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 2) MAIN ORDER PROCESSOR CLASS
+# --------------------------------------------------------------------------
 
 class OrderProcessor:
     """
@@ -74,7 +74,7 @@ class OrderProcessor:
         # 2.2) Configure the AI model (Google Generative AI, Gemini)
         try:
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            self.model = genai.GenerativeModel("gemini-1.5-flash")
+            self.model = genai.GenerativeModel("gemini-1.5-flash-8b")
         except Exception as e:
             logging.error(f"AI model initialization error: {e}")
             self.model = None
@@ -85,28 +85,39 @@ class OrderProcessor:
         if 'order_confirmed' not in st.session_state:
             st.session_state.order_confirmed = False
         if 'user_id' not in st.session_state:
-            # We'll prompt the user to enter their user ID/name in the UI
             st.session_state.user_id = None
 
         # 2.4) Load the existing orders database from JSON
         self.all_orders = load_orders_db()
 
-    # --------------------------------------------------------------------------
-    #  3) LLM PROMPTS AND PARSING
-    # --------------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # 3) LLM PROMPTS AND PARSING
+    # ----------------------------------------------------------------------
 
     def generate_intent_prompt(self, user_input: str) -> str:
         """
         Constructs a prompt that instructs the AI to parse store-related actions
         from the user's text. Includes synonyms and the new REPEAT_ORDER feature
         for "repeat all my orders" or "last X orders".
+        We also provide examples to ensure the model understands multiple actions
+        can appear in a single request.
+
+        If the user says something like:
+          - "Add 2 quinoa and show me the cart"
+            => parse as two actions: ADD + VIEW_CART
+          - "Place an order for 2 quinoa and 2 almonds"
+            => parse as two actions: ADD + CONFIRM_ORDER
+          - "Add 1 kale, 2 almonds, 3 quinoa, remove 1 quinoa, and confirm order"
+            => parse as ADD + REMOVE + CONFIRM_ORDER
         """
+
         products_list = ", ".join(p['name'] for p in self.PRODUCTS)
 
         return f"""
         You are an assistant that processes store orders for the user (with a user_id).
-        The user may specify multiple or conflicting actions in a single request.
-        You should parse them all in order.
+        The user may specify multiple or combined actions in a single request.
+        You should parse them all in order. Each action should become a separate
+        object in the "actions" array.
 
         **Possible Actions & Synonyms**:
         1) ADD
@@ -114,11 +125,12 @@ class OrderProcessor:
         2) REMOVE
            - synonyms: "remove", "delete", "take out", "subtract"
         3) VIEW_CART
-           - synonyms: "show cart", "view cart", "what's in my cart"
+           - synonyms: "show cart", "view cart", "what's in my cart", "see my cart", "show my current orders"
         4) VIEW_PRODUCTS
            - synonyms: "list products", "show products", "catalog"
         5) CONFIRM_ORDER
-           - synonyms: "confirm", "checkout", "bill me", "finalize", "complete purchase", "pay"
+           - synonyms: "confirm", "checkout", "bill me", "finalize", "complete purchase",
+             "pay", "complete my order", "place order", "place an order"
         6) CANCEL_ORDER
            - synonyms: "cancel order", "void order", "abort order"
         7) RESET_CART
@@ -130,28 +142,83 @@ class OrderProcessor:
              If the user references "repeat all my previous orders", or "repeat last X orders",
              you can interpret:
                "intent": "REPEAT_ORDER",
-               "items": [
-                 {{"product": null, "quantity": null}}
-               ],
+               "items": [{{"product": null, "quantity": null}}],
                "explanation": "User wants to reorder from all or last X."
+
+        **Handling Multiple Items**:
+        - If the user says "add 2 quinoa and 2 almonds", you can group them under a single
+          ADD action with multiple items in the array, or use multiple ADD actions. Either is valid.
+          E.g.:
+          {{
+            "actions": [
+              {{
+                "intent": "ADD",
+                "items": [
+                  {{"product": "quinoa", "quantity": 2}},
+                  {{"product": "almonds", "quantity": 2}}
+                ],
+                "explanation": "User wants multiple items"
+              }}
+            ]
+          }}
 
         **Handling Quantities**:
         - If user requests more items than in stock, parse it normally,
-          but note the potential issue in "explanation".
+          but note the potential issue in "explanation" if needed.
+
+        **Examples**:
+        - If the user says: "Add 2 quinoa and show me the cart",
+          return:
+          {{
+            "actions": [
+              {{
+                "intent": "ADD",
+                "items": [
+                  {{"product": "quinoa", "quantity": 2}}
+                ],
+                "explanation": "User wants to add quinoa"
+              }},
+              {{
+                "intent": "VIEW_CART",
+                "items": [],
+                "explanation": "User wants to see the cart"
+              }}
+            ]
+          }}
+        - If the user says: "Place an order for 2 quinoa and 2 almonds",
+          interpret as:
+          {{
+            "actions": [
+              {{
+                "intent": "ADD",
+                "items": [
+                  {{"product": "quinoa", "quantity": 2}},
+                  {{"product": "almonds", "quantity": 2}}
+                ],
+                "explanation": "User wants to add these items"
+              }},
+              {{
+                "intent": "CONFIRM_ORDER",
+                "items": [],
+                "explanation": "User wants to finalize/checkout"
+              }}
+            ]
+          }}
 
         **JSON OUTPUT**:
-        Return JSON like:
+        Return JSON of the form:
         {{
           "actions": [
             {{
-              "intent": "...",
+              "intent": "ADD or REMOVE or ...",
               "items": [
                 {{
                   "product": "string or null",
                   "quantity": number or null
-                }}
+                }},
+                ...
               ],
-              "explanation": "..."
+              "explanation": "string"
             }},
             ...
           ]
@@ -210,7 +277,7 @@ class OrderProcessor:
                     ]
                 }
 
-            # Combine the text from all parts
+            # Combine text from all parts
             raw_text = "".join(part.text for part in response.candidates[0].content.parts).strip()
             # Clean up any code fences
             raw_text = raw_text.replace("```json", "").replace("```", "").strip()
@@ -224,7 +291,6 @@ class OrderProcessor:
 
             return data
 
-        # If the model returns invalid JSON
         except json.JSONDecodeError as e:
             logging.error(f"JSON parsing error: {e}")
             return {
@@ -248,9 +314,9 @@ class OrderProcessor:
                 ]
             }
 
-    # --------------------------------------------------------------------------
-    #  4) GENERAL CONVERSATION FALLBACK
-    # --------------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # 4) GENERAL CONVERSATION FALLBACK
+    # ----------------------------------------------------------------------
 
     def generate_general_response(self, user_input: str) -> str:
         """
@@ -290,9 +356,9 @@ class OrderProcessor:
             logging.error(f"General response error: {e}")
             return "I'm sorry, I had trouble generating a conversational response right now."
 
-    # --------------------------------------------------------------------------
-    #  5) BASIC STORE ACTIONS
-    # --------------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # 5) BASIC STORE ACTIONS
+    # ----------------------------------------------------------------------
 
     def find_product(self, product_query: Optional[str]) -> Optional[Dict[str, Any]]:
         """
@@ -326,8 +392,8 @@ class OrderProcessor:
 
     def add_to_cart(self, product_name: str, quantity: int = 1) -> bool:
         """
-        Adds a product to the cart if it's in stock.  
-        If the requested quantity exceeds stock, we adjust it.  
+        Adds a product to the cart if it's in stock.
+        If the requested quantity exceeds stock, we adjust it.
         If out of stock, we do nothing.
         """
         product = self.find_product(product_name)
@@ -370,7 +436,7 @@ class OrderProcessor:
         if not product or product['name'] not in st.session_state.cart:
             st.error(f"'{product_name}' isn't in your cart.")
             return False
-        
+
         cart_item = st.session_state.cart[product['name']]
         if quantity >= cart_item['quantity']:
             removed_qty = cart_item['quantity']
@@ -488,16 +554,15 @@ class OrderProcessor:
         st.session_state.cart = {}
         st.info("Your cart has been reset.")
 
-    # --------------------------------------------------------------------------
-    #  6) REPEAT ORDER LOGIC
-    # --------------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # 6) REPEAT ORDER LOGIC
+    # ----------------------------------------------------------------------
 
     def repeat_order_by_criteria(self, explanation: str) -> None:
         """
         Interprets the LLM's "explanation" to see if the user wants to repeat
         "all" orders or the "last X orders." Then re-adds them to the cart.
-        If none of those patterns are found, we just re-add the user's
-        single most recent order.
+        If none of those patterns are found, re-add the single most recent order.
         """
         if not st.session_state.user_id:
             st.warning("We don't know who you are. Please enter a user ID or name above.")
@@ -509,10 +574,9 @@ class OrderProcessor:
             st.info("You have no previous orders in our records.")
             return
 
-        # Lowercase the explanation for matching
         lower_explanation = explanation.lower()
 
-        # Case A: user said "repeat all my orders"
+        # Case A: "repeat all my orders"
         if "all" in lower_explanation:
             for order in user_orders:
                 self._add_order_to_cart(order)
@@ -523,7 +587,6 @@ class OrderProcessor:
         match = re.search(r"last\s+(\d+)\s+orders?", lower_explanation)
         if match:
             x = int(match.group(1))
-            # Sort user orders by timestamp to find the most recent
             user_orders_sorted = sorted(user_orders, key=lambda o: o["timestamp"])
             subset = user_orders_sorted[-x:]  # last X
             for order in subset:
@@ -531,7 +594,7 @@ class OrderProcessor:
             st.success(f"Re-added your last {x} orders.")
             return
 
-        # Case C: no match => repeat the single most recent order
+        # Case C: no match => repeat single most recent
         user_orders_sorted = sorted(user_orders, key=lambda o: o["timestamp"])
         last_order = user_orders_sorted[-1]
         self._add_order_to_cart(last_order)
@@ -546,15 +609,15 @@ class OrderProcessor:
             qty = details["quantity"]
             self.add_to_cart(product_name, qty)
 
-    # --------------------------------------------------------------------------
-    #  7) REQUEST PROCESSING: ACTIONS + FALLBACK
-    # --------------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # 7) REQUEST PROCESSING: ACTIONS + FALLBACK
+    # ----------------------------------------------------------------------
 
     def process_request(self, user_input: str) -> None:
         """
         Main request flow:
          - Parse the user's text for store actions.
-         - If recognized, handle them (e.g., ADD, REMOVE).
+         - If recognized, handle them in order (e.g., ADD, REMOVE).
          - If no recognized actions, fallback to general conversation.
         """
         parsed_data = self.parse_intent(user_input)
@@ -563,7 +626,6 @@ class OrderProcessor:
 
         def handle_action(intent: str, items: List[Dict[str, Any]], explanation: str):
             nonlocal recognized_intent
-            # If we see a known store action (including REPEAT_ORDER), we mark recognized_intent = True
             if intent in [
                 "ADD", "REMOVE", "VIEW_CART", "VIEW_PRODUCTS",
                 "CONFIRM_ORDER", "CANCEL_ORDER", "RESET_CART", "REPEAT_ORDER"
@@ -572,7 +634,6 @@ class OrderProcessor:
 
             logging.info(f"Handling Intent: {intent} | Items: {items} | Explanation: {explanation}")
 
-            # Dispatch to the correct method
             if intent == "ADD":
                 for item in items:
                     product_name = item.get('product')
@@ -603,7 +664,6 @@ class OrderProcessor:
                 self.reset_cart()
 
             elif intent == "REPEAT_ORDER":
-                # We rely on the LLM's "explanation" to see if it's "all" or "last X"
                 self.repeat_order_by_criteria(explanation)
 
             elif intent == "ERROR":
@@ -616,7 +676,7 @@ class OrderProcessor:
             else:
                 st.warning(f"Unrecognized action: '{intent}'")
 
-        # Process each action returned by the model
+        # Process each action returned by the model in sequence
         for action in actions:
             intent = action.get("intent", "UNKNOWN")
             items = action.get("items", [])
@@ -628,16 +688,16 @@ class OrderProcessor:
             response_text = self.generate_general_response(user_input)
             st.write(response_text)
 
-# ------------------------------------------------------------------------------
-#  8) STREAMLIT ENTRY POINT
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 8) STREAMLIT ENTRY POINT
+# --------------------------------------------------------------------------
 
 def main():
     """
-    The Streamlit entry point. 
+    The Streamlit entry point.
     1) Prompts the user for a user ID/name.
     2) Initializes the OrderProcessor.
-    3) Accepts user input in a text box. 
+    3) Accepts user input in a text box.
     4) Displays the cart contents after each request.
     """
     st.title("GreenLife Chatbot")
@@ -649,7 +709,7 @@ def main():
 
     # Initialize the OrderProcessor
     processor = OrderProcessor()
-    
+
     # Let the user type a request
     user_input = st.text_input("Ask me anything or place an order:")
     if st.button("Send") and user_input.strip():

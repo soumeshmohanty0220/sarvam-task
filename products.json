@@ -1,10 +1,5 @@
 [
     {
-        "name": "Organic Almonds",
-        "price": 15.99,
-        "stock": 100
-    },
-    {
         "name": "Quinoa",
         "price": 12.50,
         "stock": 150
