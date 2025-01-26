@@ -154,5 +154,24 @@
         "quantity": 2
       }
     }
+  },
+  {
+    "order_id": "7941ba0b-5c23-4092-a43e-f5dd5309bcb3",
+    "user_id": "Soumesh Mohanty",
+    "timestamp": "2025-01-27T00:53:03.692189",
+    "items": {
+      "Organic Quinoa": {
+        "price": 5.99,
+        "quantity": 2
+      },
+      "Raw Almonds": {
+        "price": 7.49,
+        "quantity": 2
+      },
+      "Chia Seeds": {
+        "price": 4.99,
+        "quantity": 5
+      }
+    }
   }
 ]
