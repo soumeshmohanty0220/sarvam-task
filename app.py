@@ -60,11 +60,24 @@ def save_products_db(all_products: List[Dict[str, Any]]):
 # --------------------------------------------------------------------------
 
 class VectorStore:
+    EMBEDDINGS_FILE = "product_embeddings.npy"
+    FAISS_INDEX_FILE = "faiss_index.bin"
+
     def __init__(self, products: List[Dict[str, Any]], embedding_model_name: str = 'all-MiniLM-L6-v2'):
         self.products = products
         self.model = SentenceTransformer(embedding_model_name)
-        self.embeddings = self._generate_embeddings()
-        self.index = self._create_faiss_index()
+        
+        if self._check_existing_files():
+            self.embeddings = self._load_embeddings()
+            self.index = self._load_faiss_index()
+        else:
+            self.embeddings = self._generate_embeddings()
+            self.index = self._create_faiss_index()
+            self._save_embeddings()
+            self._save_faiss_index()
+
+    def _check_existing_files(self) -> bool:
+        return os.path.exists(self.EMBEDDINGS_FILE) and os.path.exists(self.FAISS_INDEX_FILE)
 
     def _generate_embeddings(self) -> np.ndarray:
         product_texts = [product['name'] for product in self.products]
@@ -73,12 +86,30 @@ class VectorStore:
 
     def _create_faiss_index(self) -> faiss.Index:
         if len(self.embeddings) == 0:
-            dimension = 384
+            dimension = 384  # Adjust based on your model's output dimension
             index = faiss.IndexFlatL2(dimension)
             return index
         dimension = self.embeddings.shape[1]
         index = faiss.IndexFlatL2(dimension)
         index.add(self.embeddings)
+        return index
+
+    def _save_embeddings(self):
+        np.save(self.EMBEDDINGS_FILE, self.embeddings)
+        logging.info("Embeddings saved to disk.")
+
+    def _load_embeddings(self) -> np.ndarray:
+        embeddings = np.load(self.EMBEDDINGS_FILE)
+        logging.info("Embeddings loaded from disk.")
+        return embeddings
+
+    def _save_faiss_index(self):
+        faiss.write_index(self.index, self.FAISS_INDEX_FILE)
+        logging.info("FAISS index saved to disk.")
+
+    def _load_faiss_index(self) -> faiss.Index:
+        index = faiss.read_index(self.FAISS_INDEX_FILE)
+        logging.info("FAISS index loaded from disk.")
         return index
 
     def query(self, query_text: str, top_k: int = 20) -> List[Dict[str, Any]]:
@@ -97,13 +128,20 @@ class VectorStore:
     def add_product(self, product: Dict[str, Any]):
         self.products.append(product)
         new_embedding = self.model.encode([product['name']], convert_to_numpy=True)
-        self.embeddings = np.vstack([self.embeddings, new_embedding])
+        if hasattr(self, 'embeddings') and self.embeddings.size > 0:
+            self.embeddings = np.vstack([self.embeddings, new_embedding])
+        else:
+            self.embeddings = new_embedding
         self.index.add(new_embedding)
+        self._save_embeddings()
+        self._save_faiss_index()
 
     def update_product(self, product_index: int, updated_product: Dict[str, Any]):
         self.products[product_index] = updated_product
         self.embeddings = self._generate_embeddings()
         self.index = self._create_faiss_index()
+        self._save_embeddings()
+        self._save_faiss_index()
 
 # --------------------------------------------------------------------------
 # 3) MAIN ORDER PROCESSOR CLASS
@@ -120,19 +158,13 @@ class OrderProcessor:
             except FileNotFoundError:
                 logging.error(f"Products file '{products_file}' not found. Proceeding with empty list.")
                 self.PRODUCTS = []
-        self.vector_store = VectorStore(self.PRODUCTS)
+        self.vector_store = VectorStore(self.PRODUCTS)  # Uses the updated VectorStore
         try:
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             self.model = genai.GenerativeModel("gemini-1.5-flash-8b")
         except Exception as e:
             logging.error(f"AI model initialization error: {e}")
             self.model = None
-        if 'cart' not in st.session_state:
-            st.session_state.cart = {}
-        if 'order_confirmed' not in st.session_state:
-            st.session_state.order_confirmed = False
-        if 'user_id' not in st.session_state:
-            st.session_state.user_id = None
         self.all_orders = load_orders_db()
 
     def generate_intent_prompt(self, user_input: str) -> str:
@@ -148,7 +180,7 @@ class OrderProcessor:
               "2) REMOVE\n"
               "   - synonyms: 'remove', 'delete', 'take out', 'subtract'\n"
               "3) VIEW_CART\n"
-              "   - synonyms: 'show cart', 'view cart', " "'what's in my cart', 'see my cart', 'show my current orders'\n"
+              "   - synonyms: 'show cart', 'view cart', 'what's in my cart', 'see my cart', 'show my current orders'\n"
               "4) VIEW_PRODUCTS\n"
               "   - synonyms: 'list products', 'show products', 'catalog'\n"
               "5) CONFIRM_ORDER\n"
@@ -230,7 +262,7 @@ class OrderProcessor:
               "    }\n"
               "  ]\n"
               "}\n\n"
-              f"**Available Products**: {products_list}\n\n"
+              "**Available Products**: {products_list}\n\n"
               f"**User Input**: \"{user_input}\"\n\n"
               "Return only valid JSON, without backticks or code fences.")
     
@@ -342,7 +374,7 @@ class OrderProcessor:
         elif len(direct_matches) > 1:
             st.warning(f"Multiple products matched '{product_query}'. Please be more specific:")
             for product in direct_matches:
-                st.write(f"- {product['name']}")
+                st.markdown(f"- {product['name']}")
             return None
 
         product_names = [p['name'] for p in self.PRODUCTS]
@@ -358,7 +390,7 @@ class OrderProcessor:
     def add_to_cart(self, product_name: str, quantity: int = 1) -> bool:
         product = self.find_product(product_name)
         if not product:
-            st.error(f"Sorry, I can't find a product called '{product_name}'.")
+            st.error(f"❌ Sorry, I can't find a product called '{product_name}'.")
             return False
 
         if product['stock'] < quantity:
@@ -369,7 +401,7 @@ class OrderProcessor:
             quantity = product['stock']
 
         if quantity <= 0:
-            st.warning(f"'{product['name']}' is out of stock, so none added.")
+            st.warning(f"⚠️ '{product['name']}' is out of stock, so none added.")
             return False
 
         if product['name'] in st.session_state.cart:
@@ -381,13 +413,14 @@ class OrderProcessor:
             }
 
         product['stock'] -= quantity
-        st.success(f"Added {quantity} x '{product['name']}' to your cart.")
+        save_products_db(self.PRODUCTS)  # Save updated stock
+        st.success(f"✅ Added {quantity} x '{product['name']}' to your cart.")
         return True
 
     def remove_from_cart(self, product_name: str, quantity: int = 1) -> bool:
         product = self.find_product(product_name)
         if not product or product['name'] not in st.session_state.cart:
-            st.error(f"'{product_name}' isn't in your cart.")
+            st.error(f"❌ '{product_name}' isn't in your cart.")
             return False
 
         cart_item = st.session_state.cart[product['name']]
@@ -395,40 +428,42 @@ class OrderProcessor:
             removed_qty = cart_item['quantity']
             del st.session_state.cart[product['name']]
             product['stock'] += removed_qty
-            st.success(f"Removed all of '{product['name']}' from your cart.")
+            st.success(f"✅ Removed all of '{product['name']}' from your cart.")
         else:
             cart_item['quantity'] -= quantity
             product['stock'] += quantity
-            st.success(f"Removed {quantity} of '{product['name']}'.")
+            st.success(f"✅ Removed {quantity} of '{product['name']}'.")
+
+        save_products_db(self.PRODUCTS)  # Save updated stock
         return True
 
     def view_cart(self) -> None:
-        st.subheader("Your Cart:")
+        st.markdown("### 🛒 **Your Cart:**")
         if not st.session_state.cart:
-            st.info("Your cart is empty right now.")
+            st.info("🛍️ Your cart is empty right now.")
             return
 
         total = 0
         for name, details in st.session_state.cart.items():
             subtotal = details['price'] * details['quantity']
             total += subtotal
-            st.write(f"- **{name}**: ${details['price']:.2f} × {details['quantity']} = ${subtotal:.2f}")
-        st.write(f"**Total: ${total:.2f}**")
+            st.markdown(f"- **{name}**: ${details['price']:.2f} × {details['quantity']} = ${subtotal:.2f}")
+        st.markdown(f"**🧾 Total: ${total:.2f}**")
 
     def view_products(self) -> None:
-        st.subheader("Available Products:")
+        st.markdown("### 📦 **Available Products:**")
         if not self.PRODUCTS:
-            st.info("No products available at the moment.")
+            st.info("📭 No products available at the moment.")
             return
         for product in self.PRODUCTS:
-            st.write(f"• **{product['name']}** — ${product['price']:.2f} (Stock: {product['stock']})")
+            st.markdown(f"• **{product['name']}** — ${product['price']:.2f} (Stock: {product['stock']})")
 
     def confirm_order(self) -> None:
         if not st.session_state.cart:
-            st.info("Your cart is empty, so there's nothing to confirm.")
+            st.info("🛒 Your cart is empty, so there's nothing to confirm.")
             return
         if not st.session_state.user_id:
-            st.warning("Please enter a user ID or name first.")
+            st.warning("⚠️ Please enter a user ID or name first.")
             return
 
         completed_items = {
@@ -451,12 +486,13 @@ class OrderProcessor:
         save_orders_db(self.all_orders)
 
         st.session_state.order_confirmed = True
-        st.success(f"Order #{order_id} confirmed for user '{st.session_state.user_id}'!")
+        st.success(f"✅ **Order #{order_id}** confirmed for user '{st.session_state.user_id}'!")
         st.session_state.cart = {}
+        save_products_db(self.PRODUCTS)  # Save updated stock
 
     def cancel_order(self) -> None:
         if not st.session_state.order_confirmed:
-            st.info("No confirmed order to cancel in this session.")
+            st.info("🛠️ No confirmed order to cancel in this session.")
             return
 
         for name, details in st.session_state.cart.items():
@@ -466,11 +502,12 @@ class OrderProcessor:
 
         st.session_state.cart = {}
         st.session_state.order_confirmed = False
-        st.warning("Your previously confirmed order (this session) is canceled and the cart is cleared.")
+        st.warning("⚠️ Your previously confirmed order (this session) is canceled and the cart is cleared.")
+        save_products_db(self.PRODUCTS)  # Save updated stock
 
     def reset_cart(self) -> None:
         if not st.session_state.cart:
-            st.info("Your cart is already empty.")
+            st.info("🧹 Your cart is already empty.")
             return
 
         for name, details in st.session_state.cart.items():
@@ -479,16 +516,17 @@ class OrderProcessor:
                 product['stock'] += details['quantity']
 
         st.session_state.cart = {}
-        st.info("Your cart has been reset.")
+        st.info("🧹 Your cart has been reset.")
+        save_products_db(self.PRODUCTS)  # Save updated stock
 
     def repeat_order_by_criteria(self, explanation: str) -> None:
         if not st.session_state.user_id:
-            st.warning("We don't know who you are. Please enter a user ID or name above.")
+            st.warning("⚠️ We don't know who you are. Please enter a user ID or name above.")
             return
 
         user_orders = [o for o in self.all_orders if o["user_id"] == st.session_state.user_id]
         if not user_orders:
-            st.info("You have no previous orders in our records.")
+            st.info("📭 You have no previous orders in our records.")
             return
 
         lower_explanation = explanation.lower()
@@ -496,7 +534,7 @@ class OrderProcessor:
         if "all" in lower_explanation:
             for order in user_orders:
                 self._add_order_to_cart(order)
-            st.success("All your previous orders have been added to the cart!")
+            st.success("✅ All your previous orders have been added to the cart!")
             return
 
         match = re.search(r"last\s+(\d+)\s+orders?", lower_explanation)
@@ -506,13 +544,13 @@ class OrderProcessor:
             subset = user_orders_sorted[-x:]
             for order in subset:
                 self._add_order_to_cart(order)
-            st.success(f"Re-added your last {x} orders.")
+            st.success(f"✅ Re-added your last {x} orders.")
             return
 
         user_orders_sorted = sorted(user_orders, key=lambda o: o["timestamp"])
         last_order = user_orders_sorted[-1]
         self._add_order_to_cart(last_order)
-        st.success("Re-added your most recent order.")
+        st.success("✅ Re-added your most recent order.")
 
     def _add_order_to_cart(self, order: Dict[str, Any]):
         for product_name, details in order["items"].items():
@@ -567,12 +605,12 @@ class OrderProcessor:
                 self.repeat_order_by_criteria(explanation)
 
             elif intent == "ERROR":
-                st.error(f"ERROR: {explanation or 'Unknown parsing error.'}")
+                st.error(f"❌ **ERROR:** {explanation or 'Unknown parsing error.'}")
 
             elif intent == "UNKNOWN":
                 pass
             else:
-                st.warning(f"Unrecognized action: '{intent}'")
+                st.warning(f"⚠️ Unrecognized action: '{intent}'")
 
         for action in actions:
             intent = action.get("intent", "UNKNOWN")
@@ -582,7 +620,7 @@ class OrderProcessor:
 
         if not recognized_intent:
             response_text = self.generate_general_response(user_input)
-            st.write(response_text)
+            st.markdown(f"**Bot:** {response_text}")
 
     def add_new_product(self, product: Dict[str, Any]) -> None:
         self.PRODUCTS.append(product)
@@ -598,22 +636,65 @@ class OrderProcessor:
 # 4) STREAMLIT ENTRY POINT
 # --------------------------------------------------------------------------
 
+# Remove the @st.cache_resource decorator to prevent caching issues
+def get_order_processor() -> OrderProcessor:
+    return OrderProcessor()
+
 def main():
-    st.title("GreenLife Chatbot")
+    st.set_page_config(page_title="GreenLife Chatbot", page_icon="🌿", layout="wide")
+    
+    # The dark theme is handled via the config.toml file, so no need for additional CSS
+    # Remove or comment out any existing inline CSS that sets background colors
+    
+    st.sidebar.title("🌿 GreenLife Chatbot")
+    st.sidebar.markdown("**Your Health Food Companion**")
+    
+    # Initialize session state variables
+    if 'cart' not in st.session_state:
+        st.session_state.cart = {}
+    if 'order_confirmed' not in st.session_state:
+        st.session_state.order_confirmed = False
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
 
-    user_id = st.text_input("Enter your user ID or name:", "")
-    if user_id:
-        st.session_state.user_id = user_id
+    # User ID Input in Sidebar
+    with st.sidebar.form(key='user_form'):
+        user_id = st.text_input("Enter your User ID or Name:", "")
+        submit_user = st.form_submit_button(label='Set User ID')
+        if submit_user and user_id.strip():
+            st.session_state.user_id = user_id.strip()
+            st.sidebar.success(f"User ID set to: **{st.session_state.user_id}**")
 
-    processor = OrderProcessor()
+    processor = get_order_processor()
 
-    user_input = st.text_input("Ask me anything or place an order:")
-    if st.button("Send") and user_input.strip():
-        with st.spinner("Thinking..."):
-            processor.process_request(user_input)
+    # Main Interface
+    st.title("🌿 GreenLife Chatbot")
+    st.markdown("Welcome to **GreenLife**, your friendly health food store assistant! How can I help you today?")
 
-    st.write("---")
-    processor.view_cart()
+    # User Input Form
+    with st.form(key='chat_form'):
+        user_input = st.text_input("💬 Ask me anything or place an order:", "")
+        submit = st.form_submit_button(label='Send')
+
+    if submit and user_input.strip():
+        with st.spinner("🤖 Processing your request..."):
+            processor.process_request(user_input.strip())
+        st.success("✅ Your request has been processed!")
+
+    st.markdown("---")
+
+    # Display Cart and Products using Columns and Expanders
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        with st.expander("📦 Available Products", expanded=True):
+            processor.view_products()
+
+    with col2:
+        with st.expander("🛒 Your Cart", expanded=True):
+            processor.view_cart()
+            
+
 
 if __name__ == "__main__":
     main()

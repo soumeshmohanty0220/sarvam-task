@@ -1,0 +1,10 @@
+2025-01-27 06:57:31,128 - INFO: Use pytorch device_name: cpu
+2025-01-27 06:57:31,161 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+2025-01-27 06:57:35,233 - INFO: Embeddings loaded from disk.
+2025-01-27 06:57:35,233 - INFO: FAISS index loaded from disk.
+2025-01-27 06:57:35,234 - INFO: AI model initialized successfully.
+2025-01-27 07:00:12,647 - INFO: Use pytorch device_name: cpu
+2025-01-27 07:00:12,647 - INFO: Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+2025-01-27 07:00:17,621 - INFO: Embeddings loaded from disk.
+2025-01-27 07:00:17,622 - INFO: FAISS index loaded from disk.
+2025-01-27 07:00:17,622 - INFO: AI model initialized successfully.
