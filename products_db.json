@@ -2,17 +2,17 @@
   {
     "name": "Organic Quinoa",
     "price": 5.99,
-    "stock": 145
+    "stock": 143
   },
   {
     "name": "Raw Almonds",
     "price": 7.49,
-    "stock": 198
+    "stock": 195
   },
   {
     "name": "Kale Leaves",
     "price": 3.99,
-    "stock": 180
+    "stock": 177
   },
   {
     "name": "Chia Seeds",
@@ -37,7 +37,7 @@
   {
     "name": "Coconut Oil",
     "price": 9.99,
-    "stock": 57
+    "stock": 56
   },
   {
     "name": "Spirulina Tablets",

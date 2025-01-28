@@ -86,7 +86,7 @@ class VectorStore:
 
     def _create_faiss_index(self) -> faiss.Index:
         if len(self.embeddings) == 0:
-            dimension = 384  # Adjust based on your model's output dimension
+            dimension = 384  # Default dimension for MiniLM embeddings
             index = faiss.IndexFlatL2(dimension)
             return index
         dimension = self.embeddings.shape[1]
@@ -116,6 +116,7 @@ class VectorStore:
         if not self.products:
             return []
         query_embedding = self.model.encode([query_text], convert_to_numpy=True)
+        print(query_embedding)
         if self.index.ntotal == 0:
             return []
         distances, indices = self.index.search(query_embedding, top_k)
@@ -123,25 +124,8 @@ class VectorStore:
         for idx in indices[0]:
             if idx < len(self.products):
                 results.append(self.products[idx])
+        print(results)
         return results
-
-    def add_product(self, product: Dict[str, Any]):
-        self.products.append(product)
-        new_embedding = self.model.encode([product['name']], convert_to_numpy=True)
-        if hasattr(self, 'embeddings') and self.embeddings.size > 0:
-            self.embeddings = np.vstack([self.embeddings, new_embedding])
-        else:
-            self.embeddings = new_embedding
-        self.index.add(new_embedding)
-        self._save_embeddings()
-        self._save_faiss_index()
-
-    def update_product(self, product_index: int, updated_product: Dict[str, Any]):
-        self.products[product_index] = updated_product
-        self.embeddings = self._generate_embeddings()
-        self.index = self._create_faiss_index()
-        self._save_embeddings()
-        self._save_faiss_index()
 
 # --------------------------------------------------------------------------
 # 3) MAIN ORDER PROCESSOR CLASS
@@ -169,7 +153,7 @@ class OrderProcessor:
 
     def generate_intent_prompt(self, user_input: str) -> str:
         relevant_products = self.vector_store.query(user_input, top_k=20)
-        products_list = ", ".join(p['name'] for p in relevant_products)
+        products_list = ", ".join(f"{p['name']} - ${p['price']} (Stock: {p['stock']})" for p in relevant_products)
         prompt = (f"You are an assistant that processes store orders for the user (with a user_id).\n"
               "The user may specify multiple or combined actions in a single request.\n"
               "You should parse them all in order. Each action should become a separate\n"
@@ -622,16 +606,6 @@ class OrderProcessor:
             response_text = self.generate_general_response(user_input)
             st.markdown(f"**Bot:** {response_text}")
 
-    def add_new_product(self, product: Dict[str, Any]) -> None:
-        self.PRODUCTS.append(product)
-        self.vector_store.add_product(product)
-        save_products_db(self.PRODUCTS)
-
-    def update_existing_product(self, product_index: int, updated_product: Dict[str, Any]) -> None:
-        self.PRODUCTS[product_index] = updated_product
-        self.vector_store.update_product(product_index)
-        save_products_db(self.PRODUCTS)
-
 # --------------------------------------------------------------------------
 # 4) STREAMLIT ENTRY POINT
 # --------------------------------------------------------------------------
@@ -694,7 +668,6 @@ def main():
         with st.expander("🛒 Your Cart", expanded=True):
             processor.view_cart()
             
-
-
+            
 if __name__ == "__main__":
     main()
