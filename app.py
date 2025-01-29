@@ -609,16 +609,11 @@ class OrderProcessor:
 # --------------------------------------------------------------------------
 # 4) STREAMLIT ENTRY POINT
 # --------------------------------------------------------------------------
-
-# Remove the @st.cache_resource decorator to prevent caching issues
 def get_order_processor() -> OrderProcessor:
     return OrderProcessor()
 
 def main():
     st.set_page_config(page_title="GreenLife Chatbot", page_icon="🌿", layout="wide")
-    
-    # The dark theme is handled via the config.toml file, so no need for additional CSS
-    # Remove or comment out any existing inline CSS that sets background colors
     
     st.sidebar.title("🌿 GreenLife Chatbot")
     st.sidebar.markdown("**Your Health Food Companion**")
