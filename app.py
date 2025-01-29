@@ -246,7 +246,7 @@ class OrderProcessor:
               "    }\n"
               "  ]\n"
               "}\n\n"
-              "**Available Products**: {products_list}\n\n"
+              f"**Available Products**: {products_list}\n\n"
               f"**User Input**: \"{user_input}\"\n\n"
               "Return only valid JSON, without backticks or code fences.")
     
@@ -668,6 +668,6 @@ def main():
         with st.expander("🛒 Your Cart", expanded=True):
             processor.view_cart()
             
-            
+
 if __name__ == "__main__":
     main()
